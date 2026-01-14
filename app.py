@@ -1,6 +1,10 @@
 import streamlit as st
 import pandas as pd
 import requests
+import urllib3
+
+# Suppress SSL warnings (needed for some gov sites)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="Art of Civic Duty", page_icon="🏛️", layout="wide")
@@ -53,18 +57,31 @@ def highlight_rows(row):
             return ['background-color: #d1ecf1; color: #0c5460'] * len(row)
     return [''] * len(row)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def get_council_agenda():
     url = "https://phila.legistar.com/Calendar.aspx"
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        html = requests.get(url, headers=headers).content
-        df_list = pd.read_html(html)
+        # STEALTH MODE: Fake ID to look like a real browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        # verify=False ignores SSL certificate errors (common on old gov sites)
+        response = requests.get(url, headers=headers, verify=False, timeout=15)
+        response.raise_for_status() # Check if they blocked us (403 Forbidden)
+
+        df_list = pd.read_html(response.content)
         if df_list:
             df = df_list[0]
             cols = [c for c in df.columns if any(x in c for x in ["Name", "Date", "Time", "Location", "Agenda"])]
             return df[cols]
-    except:
+    except Exception as e:
+        # If it fails, print the ACTUAL error so we know why
+        st.error(f"⚠️ City Connection Error: {e}") 
         return pd.DataFrame()
     return pd.DataFrame()
 
@@ -91,7 +108,7 @@ with tab1:
         st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
         if df.empty: st.write("No agenda items found for this specific focus area right now.")
     else:
-        st.warning("Could not pull live data. Legistar might be down.")
+        st.warning("Trying to connect to Legistar... (If this persists, the City may be blocking cloud traffic)")
 
 with tab2:
     st.header("Zoning Watch")
@@ -102,4 +119,3 @@ with tab2:
 with tab3:
     st.header("Historic Preservation")
     st.link_button("Historical Commission Agenda", "https://www.phila.gov/departments/philadelphia-historical-commission/public-meetings/")
-    
