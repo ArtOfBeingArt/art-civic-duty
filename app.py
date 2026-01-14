@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import feedparser
 import urllib3
 
 # Suppress SSL warnings
@@ -38,6 +37,7 @@ ALL_KEYWORDS = LOCAL_KEYWORDS + CENTER_CITY_KEYWORDS
 
 # --- HELPER FUNCTIONS ---
 def highlight_rows(row):
+    # Convert row to text safely
     row_text = str(row.values).lower()
     for k in LOCAL_KEYWORDS:
         if k.lower() in row_text:
@@ -48,66 +48,41 @@ def highlight_rows(row):
     return [''] * len(row)
 
 @st.cache_data(ttl=600)
-def get_feed_data():
-    rss_url = "https://phila.legistar.com/Feed.aspx?Mode=Calendar&Client=Philadelphia"
+def get_schedule():
+    url = "https://phila.legistar.com/Calendar.aspx"
     
-    # 1. Fetch raw data with "Human" headers
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
     try:
-        response = requests.get(rss_url, headers=headers, verify=False, timeout=15)
+        response = requests.get(url, headers=headers, verify=False, timeout=15)
         
-        # DEBUG: Check if we are blocked
-        if response.status_code != 200:
-            return pd.DataFrame(), f"Error: City Server responded with Code {response.status_code}"
-
-        # 2. Parse with feedparser (Industrial Strength Parser)
-        feed = feedparser.parse(response.content)
+        # THE SNIPER SCOPE: match="Meeting Time"
+        # This tells pandas: "Only bring me tables that contain this specific text."
+        # This ignores the search bars and headers.
+        dfs = pd.read_html(response.content, match="Meeting Time")
         
-        if not feed.entries:
-            return pd.DataFrame(), "Connected, but found no entries in feed."
-
-        # 3. Extract Data
-        data = []
-        for entry in feed.entries:
-            # Title usually contains: "Committee Name - Date - Time"
-            title = entry.title
-            link = entry.link
+        if len(dfs) > 0:
+            df = dfs[0]
             
-            # Clean up the text
-            clean_name = title
-            clean_date = "Check details"
+            # Clean up: Legistar tables often have a weird first column or empty rows
+            # 1. Drop columns that are all NaN (empty)
+            df = df.dropna(axis=1, how='all')
             
-            if " - " in title:
-                parts = title.split(" - ")
-                if len(parts) >= 2:
-                    clean_name = parts[0]
-                    # Join the rest in case date/time are split
-                    clean_date = " - ".join(parts[1:])
+            # 2. Rename columns safely if they exist
+            # We just return the raw table first to ensure it works
+            return df, "OK"
             
-            data.append({
-                "Meeting": clean_name,
-                "When": clean_date,
-                "Link": link
-            })
-            
-        return pd.DataFrame(data), "OK"
-        
     except Exception as e:
-        return pd.DataFrame(), f"Crash Error: {str(e)}"
+        return pd.DataFrame(), str(e)
+        
+    return pd.DataFrame(), "No Data Found"
 
-# --- MAIN PAGE ---
+# --- DASHBOARD ---
 st.title("🏛️ Philadelphia Governance Dashboard")
 
-df, status = get_feed_data()
-
-# STATUS INDICATOR (Hidden if working, visible if broken)
-if status != "OK":
-    st.error(f"⚠️ Connection Status: {status}")
-    st.info("If this is a '403' error, the City is blocking the cloud server's IP address.")
+df, status = get_schedule()
 
 if not df.empty:
     # FILTERS
@@ -120,20 +95,17 @@ if not df.empty:
     else:
         filtered_df = df
         
-    # DISPLAY TABLE
-    st.write(f"**Found {len(filtered_df)} upcoming items:**")
+    st.write(f"**Upcoming Schedule:**")
     st.dataframe(
         filtered_df.style.apply(highlight_rows, axis=1),
-        column_config={"Link": st.column_config.LinkColumn("Details")},
         use_container_width=True,
         hide_index=True
     )
-    
 else:
-    if status == "OK":
-        st.warning("Feed connected but empty (City might have no meetings scheduled).")
+    # Error Handling
+    st.error(f"⚠️ Connection Status: {status}")
+    st.info("The City website might be blocking the scraper or the layout changed.")
     
-    # Only show fallback buttons if data is missing
     st.markdown("### 🔗 Direct Access Links")
     c1, c2, c3 = st.columns(3)
     c1.link_button("Official Calendar", "https://phila.legistar.com/Calendar.aspx")
