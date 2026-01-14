@@ -68,24 +68,34 @@ def get_council_agenda():
         }
         
         response = requests.get(url, headers=headers, verify=False, timeout=15)
-        response.raise_for_status()
-
         df_list = pd.read_html(response.content)
-        if df_list:
-            df = df_list[0]
-            # ROBUST FIX: Convert column names to strings before checking
-            # This prevents the "int is not iterable" crash
-            cols = [c for c in df.columns if any(x in str(c) for x in ["Name", "Date", "Time", "Location", "Agenda"])]
+        
+        # --- SMART TABLE SEARCH ---
+        # The website has many tables (menus, footers). We need the one with data.
+        final_df = pd.DataFrame()
+        
+        for df in df_list:
+            # Convert the whole table to text to check its content
+            content = df.astype(str).to_string().lower()
             
-            # If we found matches, filter. If not (weird headers), just return the whole thing.
-            if cols:
-                return df[cols]
-            else:
-                return df
+            # If it mentions "committee" or "council" or "agenda", it's likely the real schedule
+            if "committee" in content or "council" in content or "meeting date" in content:
+                final_df = df
+                
+                # CLEANUP: Sometimes headers get stuck as the first row (0, 1, 2...)
+                # If the column names are just numbers, promote the first row to be headers
+                if isinstance(final_df.columns[0], int):
+                    final_df.columns = final_df.iloc[0] # Make row 0 the header
+                    final_df = final_df[1:]             # Delete row 0
+                
+                # Break the loop, we found it!
+                break
+                
+        return final_df
+
     except Exception as e:
-        st.error(f"⚠️ Data Error: {e}") 
+        # st.error(f"⚠️ Debug Info: {e}") 
         return pd.DataFrame()
-    return pd.DataFrame()
 
 # --- DASHBOARD ---
 st.title("🏛️ Philadelphia Governance Dashboard")
@@ -100,7 +110,9 @@ tab1, tab2, tab3 = st.tabs(["📜 City Council", "🏗️ Zoning (ZBA)", "🧱 H
 with tab1:
     df = get_council_agenda()
     if not df.empty:
-        # Convert entire dataframe to string to prevent any other type errors
+        # Basic cleanup: remove empty columns if any
+        df = df.dropna(axis=1, how='all')
+        
         if focus_mode == "Society Hill & Old City (Local)":
             pattern = '|'.join(LOCAL_KEYWORDS)
             df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
@@ -111,7 +123,7 @@ with tab1:
         st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
         if df.empty: st.write("No agenda items found for this specific focus area right now.")
     else:
-        st.warning("Could not pull live data. Legistar might be down or blocking.")
+        st.warning("Connected to City Hall, but couldn't find the Agenda table. (Site layout may have changed).")
 
 with tab2:
     st.header("Zoning Watch")
