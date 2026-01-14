@@ -47,34 +47,42 @@ def highlight_rows(row):
 
 @st.cache_data(ttl=300)
 def get_api_data():
-    # THE SERVICE ENTRANCE: Official Legistar API
-    # We ask for events from Philadelphia, happening this year
-    current_year = datetime.now().year
-    url = f"https://webapi.legistar.com/v1/philadelphia/events?$filter=EventDate+ge+datetime'{current_year}-01-01'"
+    # API ENDPOINT
+    url = "https://webapi.legistar.com/v1/philadelphia/events"
+    
+    # SAFER QUERY: We let Python handle the encoding of spaces and symbols
+    # We ask for the next 100 events to keep it fast
+    params = {
+        '$filter': f"EventDate ge datetime'{datetime.now().year}-01-01'",
+        '$top': 100
+    }
     
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, params=params, timeout=10)
         data = response.json()
         
-        # Turn the raw JSON list into a neat Table
-        if data:
+        # ERROR TRAP: Check if the API sent an error dictionary instead of a list
+        if isinstance(data, dict):
+            # If it's a dictionary, it's likely an error message. Print it for debugging.
+            st.warning(f"⚠️ API Notice: {data}")
+            return pd.DataFrame()
+            
+        # If it is a list, we can process it!
+        if isinstance(data, list):
             df = pd.DataFrame(data)
             
+            if df.empty:
+                return pd.DataFrame()
+
             # Select and Rename the columns we actually care about
-            clean_df = df[[
-                'EventBodyName', 
-                'EventDate', 
-                'EventTime', 
-                'EventSiteURL'
-            ]].copy()
+            # We use .get() to avoid crashing if a column is missing
+            clean_df = pd.DataFrame()
+            clean_df["Committee / Body"] = df.get("EventBodyName", "Unknown")
+            clean_df["Date"] = df.get("EventDate", "").str.split('T').str[0]
+            clean_df["Time"] = df.get("EventTime", "")
+            clean_df["Link"] = df.get("EventSiteURL", "#")
             
-            clean_df.columns = ["Committee / Body", "Date", "Time", "Link"]
-            
-            # Clean up the Date format (remove the T00:00:00 stuff)
-            clean_df['Date'] = clean_df['Date'].str.split('T').str[0]
-            
-            # Sort by date (newest first? or upcoming?)
-            # Let's filter for TODAY onwards
+            # Sort by date
             clean_df['DateObj'] = pd.to_datetime(clean_df['Date'])
             clean_df = clean_df[clean_df['DateObj'] >= pd.Timestamp.now().normalize()]
             clean_df = clean_df.sort_values('DateObj').drop(columns=['DateObj'])
@@ -96,7 +104,6 @@ df = get_api_data()
 if not df.empty:
     if focus_mode == "Society Hill & Old City (Local)":
         pattern = '|'.join(LOCAL_KEYWORDS)
-        # Check Committee Name AND Date (sometimes agenda details are missing in API summary, so we filter broadly)
         filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
     elif focus_mode == "Center City (Broad)":
         pattern = '|'.join(CENTER_CITY_KEYWORDS + LOCAL_KEYWORDS)
