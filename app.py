@@ -1,16 +1,21 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
+import xml.etree.ElementTree as ET
+import urllib3
 
-# --- CONFIGURATION ---
+# Suppress SSL warnings (The City's security certificate is often old)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- APP CONFIGURATION ---
 st.set_page_config(page_title="Art of Civic Duty", page_icon="🏛️", layout="wide")
 
-# --- STYLING ---
+# --- CUSTOM STYLING ---
 st.markdown("""
     <style>
     .main {background-color: #f8f9fa;}
     h1 {color: #2c3e50;}
+    .stDataFrame {font-size: 16px;}
     div[data-testid="stMetricValue"] {font-size: 24px;}
     </style>
     """, unsafe_allow_html=True)
@@ -19,8 +24,9 @@ st.markdown("""
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/5/55/Flag_of_Philadelphia%2C_Pennsylvania.svg/320px-Flag_of_Philadelphia%2C_Pennsylvania.svg.png", width=100)
     st.title("Art of Civic Duty")
-    st.caption("Live Feed from Legistar API")
+    st.caption("Monitoring Philadelphia Governance")
     
+    st.header("⚡ Quick Focus")
     focus_mode = st.radio(
         "Select Scope:",
         ["All Activity", "Center City (Broad)", "Society Hill & Old City (Local)"],
@@ -28,11 +34,12 @@ with st.sidebar:
     )
     
     st.divider()
-    st.write("✅ Connected to Legistar v1 API")
+    st.write("📡 Connection Status: Monitoring")
 
 # --- KEYWORDS ---
-LOCAL_KEYWORDS = ["Society Hill", "Old City", "District 1", "Squilla", "Washington Square", "Head House", "Penn's Landing"]
-CENTER_CITY_KEYWORDS = ["Center City", "Market St", "Broad St", "Rittenhouse", "Logan Square", "Chinatown", "City Hall"]
+LOCAL_KEYWORDS = ["Society Hill", "Old City", "District 1", "Squilla", "Washington Square", "Head House", "Penn's Landing", "Spruce St", "Pine St"]
+CENTER_CITY_KEYWORDS = ["Center City", "Market St", "Broad St", "Rittenhouse", "Logan Square", "Chinatown", "City Hall", "Vine St"]
+ALL_KEYWORDS = LOCAL_KEYWORDS + CENTER_CITY_KEYWORDS
 
 # --- HELPER FUNCTIONS ---
 def highlight_rows(row):
@@ -45,95 +52,104 @@ def highlight_rows(row):
             return ['background-color: #d1ecf1; color: #0c5460'] * len(row)
     return [''] * len(row)
 
-@st.cache_data(ttl=300)
-def get_api_data():
-    # API ENDPOINT
-    url = "https://webapi.legistar.com/v1/philadelphia/events"
-    
-    # SAFER QUERY: We let Python handle the encoding of spaces and symbols
-    # We ask for the next 100 events to keep it fast
-    params = {
-        '$filter': f"EventDate ge datetime'{datetime.now().year}-01-01'",
-        '$top': 100
-    }
+@st.cache_data(ttl=600)
+def get_council_feed():
+    # RSS URL: The public broadcast feed
+    rss_url = "https://phila.legistar.com/Feed.aspx?Mode=Calendar&Client=Philadelphia"
     
     try:
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
+        # STEALTH HEADERS: Vital to get past the firewall
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        }
         
-        # ERROR TRAP: Check if the API sent an error dictionary instead of a list
-        if isinstance(data, dict):
-            # If it's a dictionary, it's likely an error message. Print it for debugging.
-            st.warning(f"⚠️ API Notice: {data}")
-            return pd.DataFrame()
+        # Request with 10 second timeout
+        response = requests.get(rss_url, headers=headers, verify=False, timeout=10)
+        
+        # Parse XML
+        root = ET.fromstring(response.content)
+        
+        meetings = []
+        for item in root.findall('.//item'):
+            title = item.find('title').text if item.find('title') is not None else "Unknown"
+            link = item.find('link').text if item.find('link') is not None else "#"
             
-        # If it is a list, we can process it!
-        if isinstance(data, list):
-            df = pd.DataFrame(data)
+            # Attempt to split Date from Title (Format: "Committee Name - 1/20/2026 - 10:00 AM")
+            date_str = "See Link"
+            meeting_name = title
             
-            if df.empty:
-                return pd.DataFrame()
-
-            # Select and Rename the columns we actually care about
-            # We use .get() to avoid crashing if a column is missing
-            clean_df = pd.DataFrame()
-            clean_df["Committee / Body"] = df.get("EventBodyName", "Unknown")
-            clean_df["Date"] = df.get("EventDate", "").str.split('T').str[0]
-            clean_df["Time"] = df.get("EventTime", "")
-            clean_df["Link"] = df.get("EventSiteURL", "#")
+            if " - " in title:
+                parts = title.split(" - ")
+                # Usually the last two parts are Date and Time, the first part is Name
+                if len(parts) >= 2:
+                    meeting_name = parts[0]
+                    date_str = parts[1]
             
-            # Sort by date
-            clean_df['DateObj'] = pd.to_datetime(clean_df['Date'])
-            clean_df = clean_df[clean_df['DateObj'] >= pd.Timestamp.now().normalize()]
-            clean_df = clean_df.sort_values('DateObj').drop(columns=['DateObj'])
+            meetings.append({
+                "Meeting Name": meeting_name,
+                "Date": date_str,
+                "Link": link
+            })
             
-            return clean_df
+        if meetings:
+            return pd.DataFrame(meetings), "Online"
             
     except Exception as e:
-        st.error(f"API Connection Error: {e}")
+        # If this fails, we return empty so the app doesn't crash
+        pass
         
-    return pd.DataFrame()
+    return pd.DataFrame(), "Offline"
 
-# --- MAIN DASHBOARD ---
+# --- DASHBOARD ---
 st.title("🏛️ Philadelphia Governance Dashboard")
 
 # 1. Get Data
-df = get_api_data()
+df, status = get_council_feed()
 
-# 2. Filter Data
-if not df.empty:
-    if focus_mode == "Society Hill & Old City (Local)":
-        pattern = '|'.join(LOCAL_KEYWORDS)
-        filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
-    elif focus_mode == "Center City (Broad)":
-        pattern = '|'.join(CENTER_CITY_KEYWORDS + LOCAL_KEYWORDS)
-        filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
-    else:
-        filtered_df = df
-
-    # 3. Display Data
-    if not filtered_df.empty:
-        st.write(f"**Found {len(filtered_df)} upcoming events:**")
-        st.dataframe(
-            filtered_df.style.apply(highlight_rows, axis=1),
-            column_config={
-                "Link": st.column_config.LinkColumn("View Agenda"),
-                "Time": st.column_config.TextColumn("Time", width="small")
-            },
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.info("No upcoming meetings found matching your keywords.")
-        if not df.empty:
-            with st.expander("See all upcoming City meetings"):
-                st.dataframe(df, use_container_width=True, hide_index=True)
-
+if status == "Offline":
+    st.warning("⚠️ Live Feed Temporarily Unavailable (City Firewall Active).")
+    st.info("Use the direct links below to check schedules manually.")
 else:
-    st.warning("Connected to API, but received no data. (City Hall might be quiet today).")
+    if focus_mode == "Society Hill & Old City (Local)":
+        st.info(f"🔎 Focused Mode: Showing only updates for **{focus_mode}**.")
 
-st.markdown("---")
-c1, c2, c3 = st.columns(3)
-c1.link_button("Legistar Calendar (Official)", "https://phila.legistar.com/Calendar.aspx")
-c2.link_button("Zoning Archive", "https://atlas.phila.gov/")
-c3.link_button("Historic Commission", "https://www.phila.gov/departments/philadelphia-historical-commission/")
+# 2. Display Tabs
+tab1, tab2, tab3 = st.tabs(["📜 City Council Schedule", "🏗️ Zoning (ZBA)", "🧱 Historic Preservation"])
+
+with tab1:
+    if not df.empty:
+        # Apply Filters
+        if focus_mode == "Society Hill & Old City (Local)":
+            pattern = '|'.join(LOCAL_KEYWORDS)
+            filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
+        elif focus_mode == "Center City (Broad)":
+            pattern = '|'.join(ALL_KEYWORDS)
+            filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
+        else:
+            filtered_df = df
+            
+        if not filtered_df.empty:
+            st.dataframe(
+                filtered_df.style.apply(highlight_rows, axis=1), 
+                column_config={"Link": st.column_config.LinkColumn("Meeting Details")},
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.write("No meetings found matching your keywords right now.")
+            with st.expander("View All Upcoming Meetings"):
+                st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        # Graceful Fallback if data is empty (Offline)
+        st.link_button("📅 Open Official City Council Calendar", "https://phila.legistar.com/Calendar.aspx")
+
+with tab2:
+    st.header("Zoning Watch")
+    c1, c2 = st.columns(2)
+    c1.link_button("Check Society Hill Zoning", "https://atlas.phila.gov/")
+    c2.link_button("ZBA Calendar", "https://li.phila.gov/zba-appeals-calendar")
+
+with tab3:
+    st.header("Historic Preservation")
+    st.link_button("Historical Commission Agenda", "https://www.phila.gov/departments/philadelphia-historical-commission/public-meetings/")
