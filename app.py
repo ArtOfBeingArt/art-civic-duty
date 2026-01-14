@@ -1,10 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-import urllib3
-
-# Suppress SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import xml.etree.ElementTree as ET
 
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="Art of Civic Duty", page_icon="🏛️", layout="wide")
@@ -15,6 +12,7 @@ st.markdown("""
     .main {background-color: #f8f9fa;}
     h1 {color: #2c3e50;}
     .stDataFrame {font-size: 16px;}
+    div[data-testid="stMetricValue"] {font-size: 24px;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -58,72 +56,83 @@ def highlight_rows(row):
     return [''] * len(row)
 
 @st.cache_data(ttl=300)
-def get_council_agenda():
-    url = "https://phila.legistar.com/Calendar.aspx"
+def get_council_feed():
+    # DIRECT FEED: This is the official RSS feed for Philadelphia City Council
+    # It bypasses the messy website entirely.
+    rss_url = "https://phila.legistar.com/Feed.aspx?Mode=Calendar&Client=Philadelphia"
+    
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Upgrade-Insecure-Requests': '1',
-        }
+        response = requests.get(rss_url, timeout=10)
+        # Parse the XML "Radio Signal"
+        root = ET.fromstring(response.content)
         
-        response = requests.get(url, headers=headers, verify=False, timeout=15)
-        df_list = pd.read_html(response.content)
-        
-        # --- SMART TABLE SEARCH ---
-        # The website has many tables (menus, footers). We need the one with data.
-        final_df = pd.DataFrame()
-        
-        for df in df_list:
-            # Convert the whole table to text to check its content
-            content = df.astype(str).to_string().lower()
+        # Extract the meetings from the feed
+        meetings = []
+        for item in root.findall('.//item'):
+            meeting = {
+                "Meeting Name": item.find('title').text if item.find('title') is not None else "Unknown",
+                "Date": "Check Link", # RSS sometimes hides the raw date, but title has it
+                "Link": item.find('link').text if item.find('link') is not None else "#"
+            }
+            # Try to clean up the title (Format often: "Committee Name - Date - Time")
+            if " - " in meeting["Meeting Name"]:
+                parts = meeting["Meeting Name"].split(" - ")
+                if len(parts) >= 2:
+                    meeting["Meeting Name"] = parts[0]
+                    meeting["Date"] = parts[1]
             
-            # If it mentions "committee" or "council" or "agenda", it's likely the real schedule
-            if "committee" in content or "council" in content or "meeting date" in content:
-                final_df = df
-                
-                # CLEANUP: Sometimes headers get stuck as the first row (0, 1, 2...)
-                # If the column names are just numbers, promote the first row to be headers
-                if isinstance(final_df.columns[0], int):
-                    final_df.columns = final_df.iloc[0] # Make row 0 the header
-                    final_df = final_df[1:]             # Delete row 0
-                
-                # Break the loop, we found it!
-                break
-                
-        return final_df
-
+            meetings.append(meeting)
+            
+        if meetings:
+            return pd.DataFrame(meetings)
+            
     except Exception as e:
-        # st.error(f"⚠️ Debug Info: {e}") 
-        return pd.DataFrame()
+        # st.error(f"Feed Error: {e}")
+        pass
+        
+    return pd.DataFrame()
 
 # --- DASHBOARD ---
 st.title("🏛️ Philadelphia Governance Dashboard")
 
 if focus_mode == "Society Hill & Old City (Local)":
     st.info(f"🔎 Focused Mode: Showing only updates for **{focus_mode}**.")
-elif focus_mode == "Center City (Broad)":
-    st.info(f"🔎 Broad Mode: Showing updates for **{focus_mode}**.")
 
 tab1, tab2, tab3 = st.tabs(["📜 City Council", "🏗️ Zoning (ZBA)", "🧱 Historic Preservation"])
 
 with tab1:
-    df = get_council_agenda()
+    df = get_council_feed()
+    
     if not df.empty:
-        # Basic cleanup: remove empty columns if any
-        df = df.dropna(axis=1, how='all')
-        
+        # Apply Filters
         if focus_mode == "Society Hill & Old City (Local)":
             pattern = '|'.join(LOCAL_KEYWORDS)
-            df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
+            # Filter specifically on the Meeting Name or any details we have
+            filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
         elif focus_mode == "Center City (Broad)":
             pattern = '|'.join(ALL_KEYWORDS)
-            df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
+            filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
+        else:
+            filtered_df = df
             
-        st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
-        if df.empty: st.write("No agenda items found for this specific focus area right now.")
+        # Display the Data
+        if not filtered_df.empty:
+            st.write(f"**Found {len(filtered_df)} upcoming meetings:**")
+            st.dataframe(
+                filtered_df.style.apply(highlight_rows, axis=1), 
+                column_config={"Link": st.column_config.LinkColumn("Meeting Details")},
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.write("No meetings found matching your keywords right now.")
+            if not df.empty:
+                st.caption("Here are all upcoming meetings:")
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                
     else:
-        st.warning("Connected to City Hall, but couldn't find the Agenda table. (Site layout may have changed).")
+        st.warning("⚠️ Could not tune into the City Council Feed. (The RSS signal might be offline).")
+        st.link_button("Open Legistar Calendar Manually", "https://phila.legistar.com/Calendar.aspx")
 
 with tab2:
     st.header("Zoning Watch")
