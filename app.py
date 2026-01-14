@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import urllib3
 
-# Suppress SSL warnings (needed for some gov sites)
+# Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- APP CONFIGURATION ---
@@ -18,7 +18,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- SIDEBAR: THE WATCHTOWER ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/5/55/Flag_of_Philadelphia%2C_Pennsylvania.svg/320px-Flag_of_Philadelphia%2C_Pennsylvania.svg.png", width=100)
     st.title("Art of Civic Duty")
@@ -41,7 +41,7 @@ with st.sidebar:
         except:
             st.error("Connection failed")
 
-# --- KEYWORD DEFINITIONS ---
+# --- KEYWORDS ---
 LOCAL_KEYWORDS = ["Society Hill", "Old City", "District 1", "Squilla", "Washington Square", "Head House", "Penn's Landing", "Spruce St", "Pine St"]
 CENTER_CITY_KEYWORDS = ["Center City", "Market St", "Broad St", "Rittenhouse", "Logan Square", "Chinatown", "City Hall", "Vine St"]
 ALL_KEYWORDS = LOCAL_KEYWORDS + CENTER_CITY_KEYWORDS
@@ -61,31 +61,33 @@ def highlight_rows(row):
 def get_council_agenda():
     url = "https://phila.legistar.com/Calendar.aspx"
     try:
-        # STEALTH MODE: Fake ID to look like a real browser
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         }
         
-        # verify=False ignores SSL certificate errors (common on old gov sites)
         response = requests.get(url, headers=headers, verify=False, timeout=15)
-        response.raise_for_status() # Check if they blocked us (403 Forbidden)
+        response.raise_for_status()
 
         df_list = pd.read_html(response.content)
         if df_list:
             df = df_list[0]
-            cols = [c for c in df.columns if any(x in c for x in ["Name", "Date", "Time", "Location", "Agenda"])]
-            return df[cols]
+            # ROBUST FIX: Convert column names to strings before checking
+            # This prevents the "int is not iterable" crash
+            cols = [c for c in df.columns if any(x in str(c) for x in ["Name", "Date", "Time", "Location", "Agenda"])]
+            
+            # If we found matches, filter. If not (weird headers), just return the whole thing.
+            if cols:
+                return df[cols]
+            else:
+                return df
     except Exception as e:
-        # If it fails, print the ACTUAL error so we know why
-        st.error(f"⚠️ City Connection Error: {e}") 
+        st.error(f"⚠️ Data Error: {e}") 
         return pd.DataFrame()
     return pd.DataFrame()
 
-# --- MAIN DASHBOARD ---
+# --- DASHBOARD ---
 st.title("🏛️ Philadelphia Governance Dashboard")
 
 if focus_mode == "Society Hill & Old City (Local)":
@@ -98,6 +100,7 @@ tab1, tab2, tab3 = st.tabs(["📜 City Council", "🏗️ Zoning (ZBA)", "🧱 H
 with tab1:
     df = get_council_agenda()
     if not df.empty:
+        # Convert entire dataframe to string to prevent any other type errors
         if focus_mode == "Society Hill & Old City (Local)":
             pattern = '|'.join(LOCAL_KEYWORDS)
             df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
@@ -108,7 +111,7 @@ with tab1:
         st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
         if df.empty: st.write("No agenda items found for this specific focus area right now.")
     else:
-        st.warning("Trying to connect to Legistar... (If this persists, the City may be blocking cloud traffic)")
+        st.warning("Could not pull live data. Legistar might be down or blocking.")
 
 with tab2:
     st.header("Zoning Watch")
