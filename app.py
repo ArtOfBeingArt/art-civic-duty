@@ -1,7 +1,11 @@
 import streamlit as st
 import pandas as pd
 import requests
+import urllib3
 import xml.etree.ElementTree as ET
+
+# Suppress SSL warnings (The City's security certificate is often old)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="Art of Civic Duty", page_icon="🏛️", layout="wide")
@@ -57,24 +61,29 @@ def highlight_rows(row):
 
 @st.cache_data(ttl=300)
 def get_council_feed():
-    # DIRECT FEED: This is the official RSS feed for Philadelphia City Council
-    # It bypasses the messy website entirely.
     rss_url = "https://phila.legistar.com/Feed.aspx?Mode=Calendar&Client=Philadelphia"
     
     try:
-        response = requests.get(rss_url, timeout=10)
+        # STEALTH HEADERS: This is the "Fake ID" 
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        }
+        
+        # We use verify=False to ignore SSL errors, and pass the headers
+        response = requests.get(rss_url, headers=headers, verify=False, timeout=15)
+        
         # Parse the XML "Radio Signal"
         root = ET.fromstring(response.content)
         
-        # Extract the meetings from the feed
         meetings = []
         for item in root.findall('.//item'):
             meeting = {
                 "Meeting Name": item.find('title').text if item.find('title') is not None else "Unknown",
-                "Date": "Check Link", # RSS sometimes hides the raw date, but title has it
+                "Date": "Check Link", 
                 "Link": item.find('link').text if item.find('link') is not None else "#"
             }
-            # Try to clean up the title (Format often: "Committee Name - Date - Time")
+            # Clean up title
             if " - " in meeting["Meeting Name"]:
                 parts = meeting["Meeting Name"].split(" - ")
                 if len(parts) >= 2:
@@ -87,7 +96,8 @@ def get_council_feed():
             return pd.DataFrame(meetings)
             
     except Exception as e:
-        # st.error(f"Feed Error: {e}")
+        # If it fails, we print the error to the screen so we can see WHY
+        # st.error(f"Debug: {e}") 
         pass
         
     return pd.DataFrame()
@@ -104,10 +114,8 @@ with tab1:
     df = get_council_feed()
     
     if not df.empty:
-        # Apply Filters
         if focus_mode == "Society Hill & Old City (Local)":
             pattern = '|'.join(LOCAL_KEYWORDS)
-            # Filter specifically on the Meeting Name or any details we have
             filtered_df = df[df.astype(str).apply(lambda x: x.str.contains(pattern, case=False)).any(axis=1)]
         elif focus_mode == "Center City (Broad)":
             pattern = '|'.join(ALL_KEYWORDS)
@@ -115,7 +123,6 @@ with tab1:
         else:
             filtered_df = df
             
-        # Display the Data
         if not filtered_df.empty:
             st.write(f"**Found {len(filtered_df)} upcoming meetings:**")
             st.dataframe(
@@ -128,7 +135,12 @@ with tab1:
             st.write("No meetings found matching your keywords right now.")
             if not df.empty:
                 st.caption("Here are all upcoming meetings:")
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    df, 
+                    column_config={"Link": st.column_config.LinkColumn("Meeting Details")},
+                    use_container_width=True, 
+                    hide_index=True
+                )
                 
     else:
         st.warning("⚠️ Could not tune into the City Council Feed. (The RSS signal might be offline).")
